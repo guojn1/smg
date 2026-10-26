@@ -48,6 +48,48 @@ use validator::{Validate, ValidationError, ValidationErrors, ValidationErrorsKin
 #[cfg(feature = "axum")]
 pub struct ValidatedJson<T>(pub T);
 
+/// Chat-only compatibility extractor. Ordinary validation runs first; only a
+/// rejected request with a recognized history defect is retried after repair.
+#[cfg(feature = "axum")]
+pub struct CompatibleChatJson(pub crate::chat::ChatCompletionRequest);
+
+#[cfg(feature = "axum")]
+impl<S> FromRequest<S> for CompatibleChatJson
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        // Preserve the ordinary extractor's content-type handling for every
+        // format except the plain JSON bodies this compatibility path repairs.
+        if !has_plain_json_content_type(&req) {
+            let ValidatedJson(data) =
+                ValidatedJson::<crate::chat::ChatCompletionRequest>::from_request(req, state)
+                    .await?;
+            return Ok(Self(data));
+        }
+
+        let bytes = Bytes::from_request(req, state)
+            .await
+            .map_err(|err| json_rejection(JsonRejection::from(err)))?;
+
+        // The gateway's body limit is stored in the original request's
+        // extensions. Rebuilding a Request here loses it and silently falls
+        // back to axum's 2 MiB default, even for an otherwise valid chat.
+        match validated_json_bytes::<crate::chat::ChatCompletionRequest>(&bytes) {
+            Ok(ValidatedJson(data)) => Ok(Self(data)),
+            Err(original_error) => {
+                let Some(repaired) = crate::chat_compat::repair_chat_body(&bytes) else {
+                    return Err(original_error);
+                };
+                let ValidatedJson(data) = validated_json_bytes(&repaired)?;
+                Ok(Self(data))
+            }
+        }
+    }
+}
+
 /// The `error.code` of a body this extractor refused, carried as a response
 /// extension: the gateway's HTTP metrics read it when a response did not come
 /// from the gateway's own error builder, so the `error_code` label records the
@@ -419,36 +461,52 @@ where
         // request's 2,652 allocation calls, measured 2026-10-21.) Any other
         // content type goes to axum's extractor as a whole, which decides what
         // it accepts and how it refuses.
-        let Json(mut data) = if has_plain_json_content_type(&req) {
+        if has_plain_json_content_type(&req) {
             let bytes = Bytes::from_request(req, state)
                 .await
                 .map_err(|err| json_rejection(JsonRejection::from(err)))?;
-            match serde_json::from_slice::<T>(&bytes) {
-                Ok(data) => Json(data),
-                Err(_) => Json::<T>::from_bytes(&bytes).map_err(json_rejection)?,
-            }
-        } else {
-            Json::<T>::from_request(req, state)
-                .await
-                .map_err(json_rejection)?
-        };
+            return validated_json_bytes(&bytes);
+        }
 
-        // Normalize the request (apply defaults based on other fields)
-        data.normalize();
-
-        // Then, automatically validate the data
-        data.validate().map_err(|validation_errors| {
-            let (param, code) = first_violation(&validation_errors);
-            rejection(
-                StatusCode::BAD_REQUEST,
-                &code,
-                param,
-                validation_errors.to_string(),
-            )
-        })?;
-
-        Ok(ValidatedJson(data))
+        let Json(data) = Json::<T>::from_request(req, state)
+            .await
+            .map_err(json_rejection)?;
+        validate_json_data(data)
     }
+}
+
+#[cfg(feature = "axum")]
+fn validated_json_bytes<T>(bytes: &[u8]) -> Result<ValidatedJson<T>, Response>
+where
+    T: DeserializeOwned + Validate + Normalizable,
+{
+    let data = match serde_json::from_slice::<T>(bytes) {
+        Ok(data) => data,
+        Err(_) => Json::<T>::from_bytes(bytes).map_err(json_rejection)?.0,
+    };
+    validate_json_data(data)
+}
+
+#[cfg(feature = "axum")]
+fn validate_json_data<T>(mut data: T) -> Result<ValidatedJson<T>, Response>
+where
+    T: Validate + Normalizable,
+{
+    // Normalize the request (apply defaults based on other fields)
+    data.normalize();
+
+    // Then, automatically validate the data
+    data.validate().map_err(|validation_errors| {
+        let (param, code) = first_violation(&validation_errors);
+        rejection(
+            StatusCode::BAD_REQUEST,
+            &code,
+            param,
+            validation_errors.to_string(),
+        )
+    })?;
+
+    Ok(ValidatedJson(data))
 }
 
 // Implement Deref to allow transparent access to the inner value
@@ -475,6 +533,50 @@ mod tests {
     use validator::Validate;
 
     use super::*;
+
+    #[tokio::test]
+    async fn chat_compatibility_retries_only_known_history_defects() {
+        let body = r#"{"model":"glm-5.3","messages":[{"role":"assistant","content":null,"reasoning_content":"old","reasoning_content":"new","tool_calls":[{"id":null,"type":"function","function":{"name":"","arguments":"{}"}},{"id":"call_1","type":"function","function":{"name":"bash","arguments":"\"command\":\"echo hi\"}"}}]},{"role":"user","content":"continue"}]}"#;
+        let request = Request::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let CompatibleChatJson(chat) = CompatibleChatJson::from_request(request, &())
+            .await
+            .expect("known history defects should pass after repair");
+        let crate::chat::ChatMessage::Assistant {
+            tool_calls,
+            reasoning_content,
+            ..
+        } = &chat.messages[0]
+        else {
+            panic!("first message should be an assistant message");
+        };
+        assert_eq!(reasoning_content.as_deref(), Some("new"));
+        assert_eq!(tool_calls.as_ref().unwrap().len(), 1);
+
+        let missing_name_stub = Request::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"model":"m","messages":[{"role":"assistant","content":null,"tool_calls":[{"id":null,"type":"function","function":{"arguments":"{}"}},{"id":"call_1","type":"function","function":{"name":"bash","arguments":"{}"}}]},{"role":"user","content":"continue"}]}"#,
+            ))
+            .unwrap();
+        assert!(CompatibleChatJson::from_request(missing_name_stub, &())
+            .await
+            .is_ok());
+
+        let unrelated_duplicate = Request::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"model":"a","model":"b","messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap();
+        let response = CompatibleChatJson::from_request(unrelated_duplicate, &())
+            .await
+            .err()
+            .expect("unrelated duplicates must remain invalid");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 
     #[derive(Debug, Deserialize, Serialize, Validate)]
     struct TestRequest {

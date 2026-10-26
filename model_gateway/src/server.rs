@@ -19,7 +19,6 @@ use axum::{
 use llm_tokenizer::TokenizerRegistry;
 use metrics_exporter_prometheus::PrometheusHandle;
 use openai_protocol::{
-    chat::ChatCompletionRequest,
     classify::ClassifyRequest,
     completion::CompletionRequest,
     decisions::DecisionsRequest,
@@ -37,7 +36,7 @@ use openai_protocol::{
     responses::ResponsesRequest,
     systemone::SystemOneRequest,
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
-    validated::ValidatedJson,
+    validated::{CompatibleChatJson, ValidatedJson},
     worker::{
         ListWorkersQuery, StartProfileRequest, StopProfileRequest, WorkerSpec, WorkerUpdateRequest,
     },
@@ -228,7 +227,7 @@ async fn v1_chat_completions(
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     cancel: middleware::scheduler::PreemptionGuard,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
+    CompatibleChatJson(body): CompatibleChatJson,
 ) -> Response {
     let model = body.model.clone();
     cancel
@@ -3141,6 +3140,7 @@ mod tests {
 
     use axum::response::sse::{Event, Sse};
     use axum_server::accept::Accept;
+    use openai_protocol::chat::ChatCompletionRequest;
     use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
@@ -3333,6 +3333,83 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn compatible_chat_accepts_large_body_within_gateway_limit() {
+        use axum::{
+            body::Body,
+            http::header::{CONTENT_LENGTH, CONTENT_TYPE},
+        };
+        use tower::ServiceExt;
+
+        let app = attach_edge_layers(
+            Router::new().route(
+                "/v1/chat/completions",
+                post(|CompatibleChatJson(_): CompatibleChatJson| async { StatusCode::OK }),
+            ),
+            4 * 1024 * 1024,
+            InFlightRequestTracker::new(),
+            vec![],
+            vec![],
+            middleware::AccessLogFields::NONE,
+        );
+        for content_size in [2_700_000, 3_500_000] {
+            let content = "x".repeat(content_size);
+            let valid =
+                format!(r#"{{"model":"m","messages":[{{"role":"user","content":"{content}"}}]}}"#);
+            let repaired = format!(
+                r#"{{"model":"m","messages":[{{"role":"assistant","content":null,"reasoning_content":"old","reasoning_content":"new","tool_calls":[{{"id":null,"type":"function","function":{{"name":"","arguments":"{{}}"}}}},{{"id":"call_1","type":"function","function":{{"name":"bash","arguments":"{{}}"}}}}]}},{{"role":"user","content":"{content}"}}]}}"#
+            );
+
+            for body in [valid, repaired] {
+                assert!(body.len() > 2 * 1024 * 1024);
+                for chunked in [false, true] {
+                    let mut request = http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header(CONTENT_TYPE, "application/json; charset=utf-8");
+                    let framed_body = if chunked {
+                        let frames: Vec<Result<bytes::Bytes, Infallible>> = body
+                            .as_bytes()
+                            .chunks(64 * 1024)
+                            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+                            .collect();
+                        Body::from_stream(futures::stream::iter(frames))
+                    } else {
+                        request = request.header(CONTENT_LENGTH, body.len());
+                        Body::from(body.clone())
+                    };
+                    let response = app
+                        .clone()
+                        .oneshot(request.body(framed_body).unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "content_size={content_size}, chunked={chunked}"
+                    );
+                }
+            }
+        }
+
+        let oversized = format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":"{}"}}]}}"#,
+            "x".repeat(4_200_000)
+        );
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     /// A chat request body over the edge layers' 1024-byte limit of these
     /// tests.
     fn over_limit_chat_body() -> String {
@@ -3409,11 +3486,7 @@ mod tests {
             Router::new()
                 .route(
                     "/v1/chat/completions",
-                    post(
-                        |ValidatedJson(_): ValidatedJson<ChatCompletionRequest>| async {
-                            StatusCode::OK
-                        },
-                    ),
+                    post(|CompatibleChatJson(_): CompatibleChatJson| async { StatusCode::OK }),
                 )
                 .route(
                     "/v1/messages",
@@ -3495,11 +3568,7 @@ mod tests {
             Router::new()
                 .route(
                     "/v1/chat/completions",
-                    post(
-                        |ValidatedJson(_): ValidatedJson<ChatCompletionRequest>| async {
-                            StatusCode::OK
-                        },
-                    ),
+                    post(|CompatibleChatJson(_): CompatibleChatJson| async { StatusCode::OK }),
                 )
                 .route_layer(
                     middleware::RequestBodyTimeouts::from_config(&RouterConfig::default()).layer(),
