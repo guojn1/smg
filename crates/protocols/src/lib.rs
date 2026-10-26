@@ -9,6 +9,7 @@ pub const UNKNOWN_MODEL_ID: &str = "unknown";
 
 pub mod builders;
 pub mod chat;
+mod chat_compat;
 pub mod classify;
 pub mod common;
 pub mod completion;
