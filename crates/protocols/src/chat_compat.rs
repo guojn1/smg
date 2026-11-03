@@ -153,6 +153,18 @@ fn empty_tool_call(call: &Value) -> bool {
         && function.get("arguments").and_then(Value::as_str) == Some("{}")
 }
 
+// Request-only adaptation: do not weaken shared generated ToolCall types.
+// Null/absence use the existing empty-ID sentinel; scalars keep their JSON text.
+fn normalize_history_id(fields: &mut Map<String, Value>, key: &str, state: &mut RepairState) {
+    let normalized = match fields.get(key) {
+        None | Some(Value::Null) => String::new(),
+        Some(value @ (Value::Bool(_) | Value::Number(_))) => value.to_string(),
+        _ => return, // Keep strings verbatim and let objects/arrays fail normally.
+    };
+    fields.insert(key.into(), Value::String(normalized));
+    state.changed = true;
+}
+
 /// Return a repaired body only when a known compatibility defect was found.
 /// Unknown duplicate fields and malformed JSON are left to the original error.
 pub(crate) fn repair_chat_body(body: &[u8]) -> Option<Vec<u8>> {
@@ -180,6 +192,44 @@ pub(crate) fn repair_chat_body(body: &[u8]) -> Option<Vec<u8>> {
             {
                 calls.retain(|call| !empty_tool_call(call));
                 state.changed = true;
+            }
+        }
+    }
+
+    // Normalize only GLM5.3 historical IDs accepted by the official API.
+    // Do not weaken shared ToolCall response types or other model contracts.
+    let allow_compatible_ids = value
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|model| {
+            model.to_ascii_lowercase().replace('-', "").replace('.', "") == "glm53"
+        });
+    if allow_compatible_ids {
+        if let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) {
+            for message in messages {
+                match message.get("role").and_then(Value::as_str) {
+                    Some("assistant") => {
+                        if let Some(calls) =
+                            message.get_mut("tool_calls").and_then(Value::as_array_mut)
+                        {
+                            for call in calls {
+                                // Preserve the existing single-stub policy.
+                                if empty_tool_call(call) {
+                                    continue;
+                                }
+                                if let Some(call) = call.as_object_mut() {
+                                    normalize_history_id(call, "id", &mut state);
+                                }
+                            }
+                        }
+                    }
+                    Some("tool") => {
+                        if let Some(message) = message.as_object_mut() {
+                            normalize_history_id(message, "tool_call_id", &mut state);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }

@@ -1,0 +1,118 @@
+[
+  {
+    "case": "duplicate_old_text",
+    "endpoint": "configured",
+    "status": 400,
+    "seconds": 0.263,
+    "response": {
+      "error": {
+        "message": "messages[1]: historical arguments contain ambiguous or non-finite JSON. (request id: 2026110311451930358567676159157)",
+        "type": "invalid_request_error",
+        "param": "",
+        "code": "decode_bad_request"
+      }
+    }
+  },
+  {
+    "case": "duplicate_old_text",
+    "endpoint": "official",
+    "status": 200,
+    "seconds": 3.803,
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "OK",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1793677523,
+      "id": "202611031145193d143e6756c241e2",
+      "model": "glm-5.3",
+      "object": "chat.completion",
+      "request_id": "202611031145193d143e6756c241e2",
+      "usage": {
+        "completion_tokens": 3,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 246,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 249
+      }
+    }
+  },
+  {
+    "case": "unique_old_text",
+    "endpoint": "configured",
+    "status": 200,
+    "seconds": 1.805,
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": "OK",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1793677524,
+      "id": "d18ce52bfb5e482f9de841079f39a9b8",
+      "model": "glm-5.3",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 3,
+        "completion_tokens_details": {
+          "reasoning_tokens": 1
+        },
+        "prompt_tokens": 246,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 249
+      }
+    }
+  },
+  {
+    "case": "unique_old_text",
+    "endpoint": "official",
+    "status": 200,
+    "seconds": 4.038,
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "OK",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1793677529,
+      "id": "2026110311452523c95f22746e4463",
+      "model": "glm-5.3",
+      "object": "chat.completion",
+      "request_id": "2026110311452523c95f22746e4463",
+      "usage": {
+        "completion_tokens": 3,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 246,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 249
+      }
+    }
+  }
+]

@@ -1,0 +1,54 @@
+{
+  "model": "glm-5.3",
+  "stream": false,
+  "reasoning_effort": "low",
+  "max_tokens": 32,
+  "messages": [
+    {
+      "role": "user",
+      "content": "This is a synthetic history validation test. No command should be executed."
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "type": "function",
+          "function": {
+            "name": "exec_command",
+            "arguments": "{\"command\":\"echo test\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_test_1",
+      "content": "test"
+    },
+    {
+      "role": "user",
+      "content": "Reply only OK."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "exec_command",
+        "description": "Synthetic tool; never actually executed.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        }
+      }
+    }
+  ]
+}

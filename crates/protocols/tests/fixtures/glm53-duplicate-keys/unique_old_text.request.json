@@ -1,0 +1,63 @@
+{
+  "model": "glm-5.3",
+  "stream": false,
+  "reasoning_effort": "low",
+  "max_tokens": 32,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Synthetic history validation only. Do not execute any tool."
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "call_test_1",
+          "type": "function",
+          "function": {
+            "name": "edit_file",
+            "arguments": "{\"file_path\":\"/synthetic/example.md\",\"old_text\":\"Original text\",\"new_text\":\"Updated text\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_test_1",
+      "content": "Synthetic edit result: completed."
+    },
+    {
+      "role": "user",
+      "content": "Reply only OK."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "edit_file",
+        "description": "Synthetic tool, not executed.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "old_text": {
+              "type": "string"
+            },
+            "new_text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "old_text",
+            "new_text"
+          ]
+        }
+      }
+    }
+  ]
+}
