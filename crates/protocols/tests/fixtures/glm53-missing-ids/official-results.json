@@ -1,0 +1,168 @@
+[
+  {
+    "case": "valid",
+    "status": 200,
+    "seconds": 3.72,
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "OK",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1793676685,
+      "id": "202611031131215dd3b100a24746cf",
+      "model": "glm-5.3",
+      "object": "chat.completion",
+      "request_id": "202611031131215dd3b100a24746cf",
+      "usage": {
+        "completion_tokens": 3,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 193,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 196
+      }
+    }
+  },
+  {
+    "case": "screenshot_empty_id_missing_result_id",
+    "status": 200,
+    "seconds": 3.896,
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "OK",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1793676689,
+      "id": "2026110311312530374d4d1f4a425a",
+      "model": "glm-5.3",
+      "object": "chat.completion",
+      "request_id": "2026110311312530374d4d1f4a425a",
+      "usage": {
+        "completion_tokens": 3,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 193,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 196
+      }
+    }
+  },
+  {
+    "case": "missing_call_id",
+    "status": 200,
+    "seconds": 5.224,
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "OK",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1793676694,
+      "id": "2026110311312953573a41a6e145b4",
+      "model": "glm-5.3",
+      "object": "chat.completion",
+      "request_id": "2026110311312953573a41a6e145b4",
+      "usage": {
+        "completion_tokens": 3,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 193,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 196
+      }
+    }
+  },
+  {
+    "case": "empty_call_id",
+    "status": 200,
+    "seconds": 3.787,
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "OK",
+            "reasoning_content": "User says no command should be executed; reply OK.",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1793676698,
+      "id": "20261103113134e0a5120778c94cae",
+      "model": "glm-5.3",
+      "object": "chat.completion",
+      "request_id": "20261103113134e0a5120778c94cae",
+      "usage": {
+        "completion_tokens": 14,
+        "completion_tokens_details": {
+          "reasoning_tokens": 10
+        },
+        "prompt_tokens": 193,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 207
+      }
+    }
+  },
+  {
+    "case": "missing_result_id",
+    "status": 200,
+    "seconds": 5.787,
+    "response": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "OK",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1793676703,
+      "id": "20261103113138b15b4dc5cdf2431c",
+      "model": "glm-5.3",
+      "object": "chat.completion",
+      "request_id": "20261103113138b15b4dc5cdf2431c",
+      "usage": {
+        "completion_tokens": 3,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_tokens": 193,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 196
+      }
+    }
+  }
+]

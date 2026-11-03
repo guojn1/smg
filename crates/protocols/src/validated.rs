@@ -578,6 +578,207 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn glm53_official_missing_history_ids() {
+        let fixtures = [
+            include_str!("../tests/fixtures/glm53-missing-ids/valid.request.json"),
+            include_str!("../tests/fixtures/glm53-missing-ids/screenshot_empty_id_missing_result_id.request.json"),
+            include_str!("../tests/fixtures/glm53-missing-ids/missing_call_id.request.json"),
+            include_str!("../tests/fixtures/glm53-missing-ids/empty_call_id.request.json"),
+            include_str!("../tests/fixtures/glm53-missing-ids/missing_result_id.request.json"),
+        ];
+        for fixture in fixtures {
+            for stream in [false, true] {
+                let mut body: serde_json::Value = serde_json::from_str(fixture).unwrap();
+                body["stream"] = stream.into();
+                let request = Request::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+                let CompatibleChatJson(chat) = CompatibleChatJson::from_request(request, &())
+                    .await
+                    .expect("officially accepted GLM5.3 history must pass");
+                let forwarded = serde_json::to_value(chat).unwrap();
+                // Only absent IDs become empty strings. Preserve tool arguments,
+                // tool results, order and every existing ID exactly.
+                let messages = body["messages"].as_array_mut().unwrap();
+                let call = messages[1]["tool_calls"][0].as_object_mut().unwrap();
+                call.entry("id").or_insert_with(|| "".into());
+                messages[2]
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("tool_call_id")
+                    .or_insert_with(|| "".into());
+                assert_eq!(forwarded["messages"], body["messages"]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn glm53_duplicate_argument_keys_are_forwarded_intact() {
+        let fixture =
+            include_str!("../tests/fixtures/glm53-duplicate-keys/duplicate_old_text.request.json");
+        for stream in [false, true] {
+            for missing_id in [false, true] {
+                let mut body: serde_json::Value = serde_json::from_str(fixture).unwrap();
+                body["stream"] = stream.into();
+                if missing_id {
+                    body["messages"][1]["tool_calls"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("id");
+                }
+                let arguments =
+                    body["messages"][1]["tool_calls"][0]["function"]["arguments"].clone();
+                let request = Request::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+                let CompatibleChatJson(chat) = CompatibleChatJson::from_request(request, &())
+                    .await
+                    .unwrap();
+                let forwarded = serde_json::to_value(chat).unwrap();
+                assert_eq!(
+                    forwarded["messages"][1]["tool_calls"][0]["function"]["arguments"],
+                    arguments
+                );
+                assert_eq!(forwarded["messages"][2], body["messages"][2]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn glm53_missing_id_fallback_keeps_other_validation() {
+        let fixture =
+            include_str!("../tests/fixtures/glm53-missing-ids/missing_call_id.request.json");
+        // Missing IDs must not be relaxed for another model or alias.
+        for model in ["glm-4.7", "qwen3", "glm-5.3-flash"] {
+            let mut body: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            body["model"] = model.into();
+            let request = Request::builder()
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            assert!(CompatibleChatJson::from_request(request, &())
+                .await
+                .is_err());
+        }
+        // Even when fallback runs for the missing call ID, it must not hide a
+        // object/array result ID or missing function name.
+        for invalid in [json!({"id": "bad"}), json!(["bad"])] {
+            let mut body: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            body["messages"][2]["tool_call_id"] = invalid.clone();
+            let request = Request::builder()
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            assert!(CompatibleChatJson::from_request(request, &())
+                .await
+                .is_err());
+            body["messages"][2]
+                .as_object_mut()
+                .unwrap()
+                .remove("tool_call_id");
+            body["messages"][1]["tool_calls"][0]["id"] = invalid;
+            let request = Request::builder()
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            assert!(CompatibleChatJson::from_request(request, &())
+                .await
+                .is_err());
+        }
+        let mut body: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        body["messages"][1]["tool_calls"][0]["function"]
+            .as_object_mut()
+            .unwrap()
+            .remove("name");
+        let request = Request::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        assert!(CompatibleChatJson::from_request(request, &())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn glm53_history_scalar_ids_keep_arguments_and_empty_stub_repair() {
+        let fixture = include_str!("../tests/fixtures/glm53-missing-ids/valid.request.json");
+        for (id, expected) in [
+            (serde_json::Value::Null, ""),
+            (json!(7), "7"),
+            (json!(7.5), "7.5"),
+            (json!(true), "true"),
+            (json!("   "), "   "),
+        ] {
+            for stream in [false, true] {
+                let mut body: serde_json::Value = serde_json::from_str(fixture).unwrap();
+                body["stream"] = stream.into();
+                body["messages"][1]["tool_calls"][0]["id"] = id.clone();
+                body["messages"][2]["tool_call_id"] = id.clone();
+                // Include the original DOCX combination: empty stub + missing brace.
+                body["messages"][1]["tool_calls"][0]["function"]["arguments"] =
+                    json!("\"command\":\"echo test\"}");
+                body["messages"][1]["tool_calls"].as_array_mut().unwrap().insert(0,
+                    json!({"id":null,"type":"function","function":{"name":"","arguments":"{}"}}));
+                let request = Request::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+                let CompatibleChatJson(chat) = CompatibleChatJson::from_request(request, &())
+                    .await
+                    .unwrap();
+                let forwarded = serde_json::to_value(chat).unwrap();
+                let calls = forwarded["messages"][1]["tool_calls"].as_array().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["id"], expected);
+                assert_eq!(forwarded["messages"][2]["tool_call_id"], expected);
+                assert_eq!(
+                    calls[0]["function"]["arguments"],
+                    body["messages"][1]["tool_calls"][1]["function"]["arguments"]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn glm53_history_raw_strings_and_duplicate_ids_are_preserved() {
+        let fixture = include_str!("../tests/fixtures/glm53-missing-ids/valid.request.json");
+        for arguments in [
+            "[1]",
+            "7",
+            "true",
+            "null",
+            r#""text""#,
+            r#"{"a":NaN}"#,
+            r#"{"a":Infinity}"#,
+            r#"{"a":-Infinity}"#,
+        ] {
+            for name in ["", "   "] {
+                let mut body: serde_json::Value = serde_json::from_str(fixture).unwrap();
+                body["messages"][1]["tool_calls"][0]["function"]["name"] = json!(name);
+                body["messages"][1]["tool_calls"][0]["function"]["arguments"] = json!(arguments);
+                let duplicate = body["messages"][1]["tool_calls"][0].clone();
+                body["messages"][1]["tool_calls"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(duplicate);
+                let request = Request::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+                let CompatibleChatJson(chat) = CompatibleChatJson::from_request(request, &())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(chat).unwrap()["messages"],
+                    body["messages"]
+                );
+            }
+        }
+    }
+
     #[derive(Debug, Deserialize, Serialize, Validate)]
     struct TestRequest {
         #[validate(range(min = 0.0, max = 1.0))]
