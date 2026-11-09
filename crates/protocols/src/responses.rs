@@ -3368,6 +3368,23 @@ impl Normalizable for ResponsesRequest {
             self.store = Some(true);
         }
     }
+
+    #[cfg(feature = "axum")]
+    fn validation_rejection(
+        &self,
+        _param: Option<&str>,
+        code: &str,
+    ) -> Option<axum::response::Response> {
+        (code == GLM53_EMPTY_INPUT_TEXT).then(|| {
+            crate::validated::rejection_with_type(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "invalid_request",
+                None,
+                "输入不能为空".to_string(),
+            )
+        })
+    }
 }
 
 impl GenerationRequest for ResponsesRequest {
@@ -3625,7 +3642,39 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
     // Tool-result-only continuations are valid; validate_response_input checks
     // individual items without requiring a message already held in history.
 
+    if is_glm53_single_empty_input_text(request) {
+        return Err(invalid(GLM53_EMPTY_INPUT_TEXT, "输入不能为空"));
+    }
+
     Ok(())
+}
+
+const GLM53_EMPTY_INPUT_TEXT: &str = "glm53_empty_input_text";
+
+/// The Zhipu GLM-5.3 Responses endpoint rejects a standalone empty user
+/// text item. Keep the shared message validation for other requests.
+fn is_glm53_single_empty_input_text(request: &ResponsesRequest) -> bool {
+    if !request.model.eq_ignore_ascii_case("glm-5.3")
+        || request.conversation.is_some()
+        || request.previous_response_id.is_some()
+    {
+        return false;
+    }
+
+    let ResponseInput::Items(items) = &request.input else {
+        return false;
+    };
+    let (role, content) = match items.as_slice() {
+        [ResponseInputOutputItem::Message { role, content, .. }]
+        | [ResponseInputOutputItem::SimpleInputMessage {
+            role,
+            content: StringOrContentParts::Array(content),
+            ..
+        }] => (role, content),
+        _ => return false,
+    };
+    role == "user"
+        && matches!(content.as_slice(), [ResponseContentPart::InputText { text }] if text.is_empty())
 }
 
 /// The public OpenAI API's structured-output rules: a strict function schema or

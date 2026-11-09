@@ -9,6 +9,12 @@ pub trait Normalizable {
     fn normalize(&mut self) {
         // Default: no-op
     }
+
+    /// Optionally render an existing validation failure in a provider's wire format.
+    #[cfg(feature = "axum")]
+    fn validation_rejection(&self, _param: Option<&str>, _code: &str) -> Option<Response> {
+        None
+    }
 }
 
 #[cfg(feature = "axum")]
@@ -110,12 +116,23 @@ pub(crate) fn rejection(
     param: Option<String>,
     message: String,
 ) -> Response {
+    rejection_with_type(status, code, "invalid_request_error", param, message)
+}
+
+#[cfg(feature = "axum")]
+pub(crate) fn rejection_with_type(
+    status: StatusCode,
+    code: &str,
+    error_type: &str,
+    param: Option<String>,
+    message: String,
+) -> Response {
     let mut response = (
         status,
         Json(json!({
             "error": {
                 "message": message,
-                "type": "invalid_request_error",
+                "type": error_type,
                 "param": param,
                 "code": code
             }
@@ -498,12 +515,15 @@ where
     // Then, automatically validate the data
     data.validate().map_err(|validation_errors| {
         let (param, code) = first_violation(&validation_errors);
-        rejection(
-            StatusCode::BAD_REQUEST,
-            &code,
-            param,
-            validation_errors.to_string(),
-        )
+        data.validation_rejection(param.as_deref(), &code)
+            .unwrap_or_else(|| {
+                rejection(
+                    StatusCode::BAD_REQUEST,
+                    &code,
+                    param,
+                    validation_errors.to_string(),
+                )
+            })
     })?;
 
     Ok(ValidatedJson(data))
@@ -533,6 +553,61 @@ mod tests {
     use validator::Validate;
 
     use super::*;
+
+    #[tokio::test]
+    async fn glm53_responses_empty_text_matches_official_error_body() {
+        use crate::responses::ResponsesRequest;
+
+        let empty_text = json!({"type": "input_text", "text": ""});
+        let empty_user = json!({"role": "user", "content": [empty_text.clone()]});
+        let request = |body: Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let body = json!({"model": "glm-5.3", "input": [empty_user.clone()],
+                          "max_output_tokens": 32});
+        let response =
+            match ValidatedJson::<ResponsesRequest>::from_request(request(body), &()).await {
+                Ok(_) => panic!("the reported empty input was accepted"),
+                Err(response) => response,
+            };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let actual: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            actual,
+            json!({"error": {"code": "invalid_request", "message": "输入不能为空",
+                            "param": null, "type": "invalid_request"}}),
+        );
+
+        for body in [
+            json!({"model": "test-model", "input": [empty_user.clone()]}),
+            json!({"model": "glm-5.3-flash", "input": [empty_user.clone()]}),
+            json!({"model": "glm-5.3", "input": [empty_user.clone(),
+                   {"role": "assistant", "content": "Earlier answer"},
+                   {"role": "user", "content": "Continue"}]}),
+            json!({"model": "glm-5.3", "input": [empty_user.clone()],
+                   "previous_response_id": "resp_previous"}),
+            json!({"model": "glm-5.3", "input": [empty_user],
+                   "conversation": "conv_previous"}),
+            json!({"model": "glm-5.3", "input": [{"role": "user",
+                   "content": [empty_text.clone(), {"type": "input_text", "text": "Hello"}]}]}),
+            json!({"model": "glm-5.3", "input": [{"role": "user",
+                   "content": [empty_text, {"type": "input_image", "image_url": "https://example.com/image.png"}]}]}),
+        ] {
+            assert!(
+                ValidatedJson::<ResponsesRequest>::from_request(request(body), &())
+                    .await
+                    .is_ok()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn chat_compatibility_retries_only_known_history_defects() {

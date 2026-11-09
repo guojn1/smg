@@ -77,6 +77,19 @@ fn is_glm53(model: &str) -> bool {
 }
 
 pub(super) fn normalize_chat(req: &mut ChatCompletionRequest) {
+    // The official GLM-5.3 Chat endpoint accepts a top-level "none" and
+    // still returns reasoning. Use the model's default effort in that case.
+    if req.reasoning_effort.as_deref() == Some("none")
+        && super::served_under(&req.model, |model| {
+            model.rsplit('/').next().is_some_and(|name| {
+                GLM53_MARKERS
+                    .iter()
+                    .any(|marker| name.eq_ignore_ascii_case(marker))
+            })
+        })
+    {
+        req.reasoning_effort = None;
+    }
     if is_series(&req.model, &DEFAULTS_MARKERS) {
         req.temperature.get_or_insert(DEFAULT_TEMPERATURE);
         req.top_p.get_or_insert(DEFAULT_TOP_P);
@@ -319,6 +332,21 @@ mod tests {
             }))),
             Err("reasoning_effort_not_allowed".into())
         );
+    }
+
+    #[test]
+    fn glm53_chat_treats_top_level_none_as_omitted() {
+        use crate::validated::Normalizable;
+
+        let mut req = request(json!({"reasoning_effort": "none"}));
+        req.model = "zai-org/GLM-5.3".to_string();
+        req.normalize();
+        assert_eq!(req.reasoning_effort, None);
+        assert_eq!(validate(&req), Ok(()));
+
+        let mut flash = request(json!({"reasoning_effort": "none"}));
+        flash.normalize();
+        assert_eq!(validate(&flash), Err("reasoning_effort_not_allowed".into()));
     }
 
     #[test]
