@@ -3340,6 +3340,11 @@ impl Default for ResponsesRequest {
 }
 
 impl Normalizable for ResponsesRequest {
+    #[cfg(feature = "axum")]
+    fn prepare_json(bytes: &[u8]) -> Result<Option<Vec<u8>>, axum::response::Response> {
+        crate::glm53_request::prepare(bytes, crate::glm53_request::Api::Responses)
+    }
+
     /// Normalize the request by applying defaults:
     /// 1. Apply tool_choice defaults based on tools presence
     /// 2. Apply parallel_tool_calls defaults

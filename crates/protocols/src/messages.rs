@@ -94,6 +94,11 @@ pub struct CreateMessageRequest {
 }
 
 impl Normalizable for CreateMessageRequest {
+    #[cfg(feature = "axum")]
+    fn prepare_json(bytes: &[u8]) -> Result<Option<Vec<u8>>, axum::response::Response> {
+        crate::glm53_request::prepare(bytes, crate::glm53_request::Api::Messages)
+    }
+
     // Use default no-op implementation
 }
 

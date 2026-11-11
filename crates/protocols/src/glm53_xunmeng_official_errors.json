@@ -1,0 +1,399 @@
+[
+  {
+    "id": "CUS-001",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": null,
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "error": {
+      "code": "1213",
+      "message": "未正常接收到prompt参数。"
+    }
+  },
+  {
+    "id": "EFF-101",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": "你好",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "reasoning_effort": "xhigh"
+    },
+    "error": {
+      "code": "1210",
+      "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"
+    }
+  },
+  {
+    "id": "EFF-102",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": "你好",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "reasoning_effort": "medium"
+    },
+    "error": {
+      "code": "1210",
+      "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"
+    }
+  },
+  {
+    "id": "EFF-103",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": "你好",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "reasoning_effort": "minimal"
+    },
+    "error": {
+      "code": "1210",
+      "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"
+    }
+  },
+  {
+    "id": "EFF-104",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": "你好",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "reasoning_effort": "none"
+    },
+    "error": {
+      "code": "1210",
+      "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"
+    }
+  },
+  {
+    "id": "EFF-105",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": "你好",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "reasoning_effort": "ultra"
+    },
+    "error": {
+      "code": "1210",
+      "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"
+    }
+  },
+  {
+    "id": "ERR-003",
+    "request": {
+      "max_tokens": 200000,
+      "messages": [
+        {
+          "content": "你好",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "error": {
+      "code": "1210",
+      "message": "max_tokens参数非法：限制数值范围[1,131072]"
+    }
+  },
+  {
+    "id": "KS-ROB-003",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": [
+            123
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": "继续",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3"
+    },
+    "error": {
+      "code": "1214",
+      "message": "messages[0].content[0].type:不能为空"
+    }
+  },
+  {
+    "id": "KS-ROB-011",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": [
+            123
+          ],
+          "role": "system"
+        },
+        {
+          "content": "你好",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3"
+    },
+    "error": {
+      "code": "1214",
+      "message": "messages[0].content[0].type:不能为空"
+    }
+  },
+  {
+    "id": "KS-ROB-019",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": [
+            123
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3"
+    },
+    "error": {
+      "code": "1214",
+      "message": "messages[0].content[0].type:不能为空"
+    }
+  },
+  {
+    "id": "KS-ROB-023",
+    "request": {
+      "max_tokens": 64,
+      "messages": [
+        {
+          "content": "你好",
+          "role": ""
+        }
+      ],
+      "model": "glm-5.3"
+    },
+    "error": {
+      "code": "1214",
+      "message": "角色信息不能为空"
+    }
+  },
+  {
+    "id": "KS-ROB-025",
+    "request": {
+      "max_tokens": 64,
+      "messages": [
+        {
+          "content": "你好",
+          "role": "unknown_role"
+        }
+      ],
+      "model": "glm-5.3"
+    },
+    "error": {
+      "code": "1214",
+      "message": "角色信息不正确"
+    }
+  },
+  {
+    "id": "KS-ROB-026",
+    "request": {
+      "max_tokens": 64,
+      "messages": [
+        {
+          "content": "你好"
+        }
+      ],
+      "model": "glm-5.3"
+    },
+    "error": {
+      "code": "1214",
+      "message": "角色信息不能为空"
+    }
+  },
+  {
+    "id": "KS-ROB-027",
+    "request": {
+      "max_tokens": 64,
+      "messages": [
+        {
+          "content": "你好",
+          "role": "  "
+        }
+      ],
+      "model": "glm-5.3"
+    },
+    "error": {
+      "code": "1214",
+      "message": "角色信息不能为空"
+    }
+  },
+  {
+    "id": "KS-TOOL-003",
+    "request": {
+      "max_tokens": 500,
+      "messages": [
+        {
+          "content": "帮我查一下北京的天气。",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "tool_choice": {
+        "function": {
+          "name": "nonexistent_function_xyz"
+        },
+        "type": "function"
+      },
+      "tools": [
+        {
+          "function": {
+            "description": "获取指定城市的天气信息，返回温度和天气状况",
+            "name": "get_weather",
+            "parameters": {
+              "properties": {
+                "city": {
+                  "description": "城市名称",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "error": {
+      "code": "1210",
+      "message": "API 调用参数有误，请检查文档。"
+    }
+  },
+  {
+    "id": "REQ-MSG-005",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": [],
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "error": {
+      "code": "1213",
+      "message": "未正常接收到prompt参数。"
+    }
+  },
+  {
+    "id": "REQ-MSG-006",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": "你是一个有用的助手。",
+          "role": "system"
+        }
+      ],
+      "model": "glm-5.3",
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "error": {
+      "code": "1214",
+      "message": "messages 参数非法。请检查文档。"
+    }
+  },
+  {
+    "id": "THK-004",
+    "request": {
+      "max_tokens": 200,
+      "messages": [
+        {
+          "content": "你好",
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "thinking": {
+        "type": "adaptive"
+      }
+    },
+    "error": {
+      "code": "1210",
+      "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。"
+    }
+  },
+  {
+    "id": "VIS-URL-001",
+    "request": {
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "content": [
+            {
+              "image_url": {
+                "url": "http://115.191.70.236:18080/report-20260923-062409-f92b96/content_k3_red_square.png"
+              },
+              "type": "image_url"
+            },
+            {
+              "text": "这张图里有什么？请说出颜色和文字。",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "glm-5.3",
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "error": {
+      "code": "1210",
+      "message": "messages.content.type 参数非法，取值范围 ['text']"
+    }
+  }
+]

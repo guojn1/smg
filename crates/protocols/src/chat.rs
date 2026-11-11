@@ -893,6 +893,11 @@ impl ChatCompletionRequest {
 // ============================================================================
 
 impl Normalizable for ChatCompletionRequest {
+    #[cfg(feature = "axum")]
+    fn prepare_json(bytes: &[u8]) -> Result<Option<Vec<u8>>, axum::response::Response> {
+        crate::glm53_request::prepare(bytes, crate::glm53_request::Api::Chat)
+    }
+
     /// Normalize the request:
     /// 1. Apply the profile's rewrites to the request as the client sent it,
     ///    before any migration: drop message extensions that belong to another

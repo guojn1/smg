@@ -1224,6 +1224,9 @@ pub fn build_apps(
     // since the streamed relay has its own watchdog).
     let typed_routes = Router::new()
         .route("/v1/responses", post(v1_responses))
+        .merge(middleware::glm53_error_compat::compact_routes(
+            glm53_official_errors,
+        ))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(
             "/v1/responses/{response_id}/cancel",

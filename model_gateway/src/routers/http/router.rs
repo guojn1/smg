@@ -134,6 +134,7 @@ pub struct Router {
     /// Streamed-body stall watchdog: abort a dispatch once a single client
     /// wait lasts this long. `None` disables.
     stream_stall_timeout: Option<Duration>,
+    request_body_timeouts: crate::middleware::RequestBodyTimeouts,
     /// Cap on buffering a request only to keep it retryable; larger eligible
     /// requests stream and forfeit router retries. `0` never buffers for
     /// retries.
@@ -200,6 +201,9 @@ impl Router {
             policy_registry: ctx.policy_registry.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
             max_payload_size: ctx.router_config.max_payload_size,
+            request_body_timeouts: crate::middleware::RequestBodyTimeouts::from_config(
+                &ctx.router_config,
+            ),
             stream_stall_timeout: match ctx.router_config.stream_body_stall_timeout_secs {
                 0 => None,
                 secs => Some(Duration::from_secs(secs)),
@@ -1281,7 +1285,7 @@ impl Router {
             response
         } else {
             // For non-streaming requests, preserve headers
-            let response_headers = header_utils::preserve_response_headers(res.headers());
+            let mut response_headers = header_utils::preserve_response_headers(res.headers());
 
             // Cap the buffered read at the ingress payload limit; this is the
             // point where an upstream body is first pulled into memory.
@@ -1292,6 +1296,20 @@ impl Router {
             .await
             {
                 Ok(body) => {
+                    let body = if status.is_success()
+                        && openai_protocol::glm53_request::is_glm53(source.worker().model_id())
+                    {
+                        if let Some(fixed) =
+                            openai_protocol::glm53_request::normalize_chat_response(&body)
+                        {
+                            response_headers.remove(CONTENT_LENGTH);
+                            Bytes::from(fixed)
+                        } else {
+                            body
+                        }
+                    } else {
+                        body
+                    };
                     let mut response = Response::new(Body::from(body));
                     *response.status_mut() = status;
                     *response.headers_mut() = response_headers;
@@ -2019,6 +2037,34 @@ impl Router {
             Metrics::record_request_body_path(BODY_PATH_BUFFERED, REASON_MODEL_AMBIGUOUS);
             return Err(req);
         }
+        // The header-only fast path must apply the same GLM wire rules as
+        // the typed extractor. Buffer only a GLM fleet's Chat/Messages body;
+        // do not send histories through extra typed validation. The original
+        // extensions retain configured payload limits and the body watchdog.
+        let api = match route {
+            "/v1/chat/completions" => Some(openai_protocol::glm53_request::Api::Chat),
+            "/v1/messages" => Some(openai_protocol::glm53_request::Api::Messages),
+            _ => None,
+        };
+        let req = if let Some(api) =
+            api.filter(|_| openai_protocol::glm53_request::is_glm53(worker.model_id()))
+        {
+            let (mut parts, bytes) = match self.request_body_timeouts.collect(req).await {
+                Ok(collected) => collected,
+                Err(response) => return Ok(response),
+            };
+            let bytes = match openai_protocol::glm53_request::prepare(&bytes, api) {
+                Ok(Some(fixed)) => {
+                    parts.headers.remove(CONTENT_LENGTH);
+                    Bytes::from(fixed)
+                }
+                Ok(None) => bytes,
+                Err(response) => return Ok(response),
+            };
+            Request::from_parts(parts, Body::from(bytes))
+        } else {
+            req
+        };
         Metrics::record_request_body_path(BODY_PATH_STREAMED, stream_reason);
 
         let start = Instant::now();
@@ -2726,6 +2772,9 @@ mod tests {
             retry_config: RetryConfig::default(),
             max_payload_size: 536_870_912,
             stream_stall_timeout: Some(Duration::from_secs(60)),
+            request_body_timeouts: crate::middleware::RequestBodyTimeouts::from_config(
+                &Default::default(),
+            ),
             max_buffered_request_bytes: 0,
             realtime_registry: Arc::new(RealtimeRegistry::new()),
             webrtc_bind_addr: None,
@@ -3119,6 +3168,9 @@ mod tests {
             retry_config: retry,
             max_payload_size: 536_870_912,
             stream_stall_timeout: Some(Duration::from_secs(60)),
+            request_body_timeouts: crate::middleware::RequestBodyTimeouts::from_config(
+                &Default::default(),
+            ),
             max_buffered_request_bytes: 0,
             realtime_registry: Arc::new(RealtimeRegistry::new()),
             webrtc_bind_addr: None,
@@ -3613,6 +3665,9 @@ mod tests {
             retry_config: RetryConfig::default(),
             max_payload_size,
             stream_stall_timeout: Some(Duration::from_secs(60)),
+            request_body_timeouts: crate::middleware::RequestBodyTimeouts::from_config(
+                &Default::default(),
+            ),
             // Streaming tests exercise the streamed path; 0 never buffers
             // for retries.
             max_buffered_request_bytes: 0,

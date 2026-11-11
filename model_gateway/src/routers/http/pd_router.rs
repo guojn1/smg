@@ -2020,11 +2020,27 @@ impl PDRouter {
                 .await
             } else {
                 // Direct passthrough when no logprobs needed
-                let response_headers =
+                let mut response_headers =
                     header_utils::preserve_response_headers(decode_response.headers());
 
                 match decode_response.bytes().await {
                     Ok(decode_body) => {
+                        let decode_body = if status.is_success()
+                            && openai_protocol::glm53_request::is_glm53(context.model_id)
+                        {
+                            if let Some(fixed) =
+                                openai_protocol::glm53_request::normalize_chat_response(
+                                    &decode_body,
+                                )
+                            {
+                                response_headers.remove(axum::http::header::CONTENT_LENGTH);
+                                bytes::Bytes::from(fixed)
+                            } else {
+                                decode_body
+                            }
+                        } else {
+                            decode_body
+                        };
                         let mut response = Response::new(Body::from(decode_body));
                         *response.status_mut() = status;
                         *response.headers_mut() = response_headers;

@@ -11,4 +11,11 @@
 
 验证：新增中间件 4 项隔离测试通过，直接引用当前 Rust 源文件，覆盖三个缺参场景、鉴权响应格式及作用域、历史原文保留、3 MiB 请求与配置上限。auth.rs 另补充鉴权矩阵测试，供完整 SMG 测试执行。隔离测试不代替完整构建/部署回归。
 
-本次未打新 wheel、未提交或推送、未操作集群。之前的 wheel 不含本次补丁。
+此文档描述源码行为；部署是否生效以安装的 wheel 和环境开关为准。仅替换 worker 镜像不会启用 router 缺参/鉴权兼容。
+
+补充：`/v1/responses/compact` 的官网 501 响应仅在 `SMG_GLM53_OFFICIAL_ERROR_COMPAT=1` 的专用兼容入口注册；关闭时保留原路由行为。该开关为监听入口级别，不应在混合模型入口开启。
+
+
+安与信补充（2026-11-11）：模型名明确为 GLM-5.3 时，Chat 的负 temperature、负 top_p、presence_penalty<-2 使用现有模型默认值；只对齐实测 HTTP 200 接收行为，不声称官网内部采样算法相同。有效参数不改。
+
+Chat 的 web_search/MCP 声明保存于 `glm53_hosted_tools` 扩展，避免进入 function-only 解析器；真实 function 声明及工具历史不改。这不是搜索或 MCP 执行器，调用这些托管服务仍需网关编排。web_search.enable 为非 true/false 字符串仍按实测官网返回 400/code="400"。Messages 的 max_tokens=0 返回 400/code="1210"，无效 tool_choice.type 忽略。

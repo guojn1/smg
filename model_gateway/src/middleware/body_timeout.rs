@@ -69,6 +69,21 @@ pub struct RequestBodyTimeouts {
 }
 
 impl RequestBodyTimeouts {
+    /// Collect a compatibility request using the same watchdog and configured
+    /// extractor limit as typed routes, including the 408/413 error mapping.
+    pub async fn collect(
+        self,
+        request: Request<Body>,
+    ) -> Result<(axum::http::request::Parts, Bytes), Response> {
+        use axum::{extract::FromRequest, response::IntoResponse};
+        let (request, outcome) = timed(request, self);
+        let (parts, body) = request.into_parts();
+        match Bytes::from_request(Request::from_parts(parts.clone(), body), &()).await {
+            Ok(bytes) => Ok((parts, bytes)),
+            Err(error) => Err(settled(self, &outcome, error.into_response())),
+        }
+    }
+
     pub fn from_config(config: &RouterConfig) -> Self {
         Self {
             stall: match config.stream_body_stall_timeout_secs {
@@ -317,6 +332,47 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn compatibility_collect_preserves_configured_payload_limit() {
+        use axum::extract::DefaultBodyLimit;
+        let app = |limit| {
+            Router::new()
+                .route(
+                    "/echo",
+                    post(|request: Request| async move {
+                        match timeouts(5, 60).collect(request).await {
+                            Ok((_, bytes)) => Response::new(Body::from(bytes)),
+                            Err(response) => response,
+                        }
+                    }),
+                )
+                .layer(DefaultBodyLimit::max(limit))
+        };
+        let payload = "x".repeat(3 * 1024 * 1024);
+        let response = app(4 * 1024 * 1024)
+            .oneshot(echo(Body::from(payload.clone())))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .len(),
+            payload.len()
+        );
+        let response = app(1024).oneshot(echo(Body::from(payload))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compatibility_collect_keeps_stall_error_mapping() {
+        let body = Body::from_stream(stream::pending::<Result<Bytes, Infallible>>());
+        let response = timeouts(5, 60).collect(echo(body)).await.unwrap_err();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(error_code(response).await, REQUEST_BODY_STALLED);
+    }
 
     fn app(timeouts: RequestBodyTimeouts) -> Router {
         Router::new()

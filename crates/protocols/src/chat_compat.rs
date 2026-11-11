@@ -165,6 +165,22 @@ fn normalize_history_id(fields: &mut Map<String, Value>, key: &str, state: &mut 
     state.changed = true;
 }
 
+/// Parse without silently collapsing duplicate fields. Parameter compatibility
+/// uses the same duplicate-key policy as the existing history repair.
+#[cfg(feature = "axum")]
+pub(crate) fn parse_compat_body(body: &[u8]) -> Option<Value> {
+    let mut state = RepairState::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    let value = TreeSeed {
+        state: &mut state,
+        position: Position::Root,
+    }
+    .deserialize(&mut deserializer)
+    .ok()?;
+    deserializer.end().ok()?;
+    Some(value)
+}
+
 /// Return a repaired body only when a known compatibility defect was found.
 /// Unknown duplicate fields and malformed JSON are left to the original error.
 pub(crate) fn repair_chat_body(body: &[u8]) -> Option<Vec<u8>> {

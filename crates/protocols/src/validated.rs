@@ -5,6 +5,12 @@
 
 /// Trait for request types that need post-deserialization normalization
 pub trait Normalizable {
+    /// Model-specific wire compatibility, before strongly typed deserialization.
+    #[cfg(feature = "axum")]
+    fn prepare_json(_bytes: &[u8]) -> Result<Option<Vec<u8>>, Response> {
+        Ok(None)
+    }
+
     /// Normalize the request by applying defaults and transformations
     fn normalize(&mut self) {
         // Default: no-op
@@ -68,8 +74,8 @@ where
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         // Preserve the ordinary extractor's content-type handling for every
-        // format except the plain JSON bodies this compatibility path repairs.
-        if !has_plain_json_content_type(&req) {
+        // format except the JSON bodies this compatibility path repairs.
+        if !has_compat_json_content_type(&req) {
             let ValidatedJson(data) =
                 ValidatedJson::<crate::chat::ChatCompletionRequest>::from_request(req, state)
                     .await?;
@@ -383,11 +389,12 @@ fn length_code(error: &ValidationError) -> String {
 /// bare or with well-formed `name=value` parameters (a token name; a token
 /// or a non-empty quoted string as the value; a parameter may follow its `;`
 /// after spaces, nothing else): a strict subset of what axum's extractor
-/// accepts, parsed directly. A `+json` suffix, a parameter the check doubts,
+/// accepts, parsed directly. JSON suffix types use the same compatibility
+/// checks as application/json. A parameter the check doubts,
 /// whitespace where the MIME grammar has none, or anything else is left to
 /// axum's extractor, which decides as before.
 #[cfg(feature = "axum")]
-fn has_plain_json_content_type(req: &Request) -> bool {
+fn has_compat_json_content_type(req: &Request) -> bool {
     let Some(value) = req
         .headers()
         .get(CONTENT_TYPE)
@@ -397,7 +404,18 @@ fn has_plain_json_content_type(req: &Request) -> bool {
     };
     let mut parts = value.split(';');
     let mime = parts.next().unwrap_or("");
-    mime.eq_ignore_ascii_case("application/json") && parts.all(is_mime_parameter)
+    let mime = mime.to_ascii_lowercase();
+    let is_json = mime == "application/json"
+        || mime
+            .strip_prefix("application/")
+            .and_then(|subtype| subtype.strip_suffix("+json"))
+            .is_some_and(|prefix| {
+                !prefix.is_empty()
+                    && prefix
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+            });
+    is_json && parts.all(is_mime_parameter)
 }
 
 /// `name=value` after the spaces that may follow the `;`: a token name and a
@@ -478,7 +496,7 @@ where
         // request's 2,652 allocation calls, measured 2026-10-21.) Any other
         // content type goes to axum's extractor as a whole, which decides what
         // it accepts and how it refuses.
-        if has_plain_json_content_type(&req) {
+        if has_compat_json_content_type(&req) {
             let bytes = Bytes::from_request(req, state)
                 .await
                 .map_err(|err| json_rejection(JsonRejection::from(err)))?;
@@ -497,6 +515,8 @@ fn validated_json_bytes<T>(bytes: &[u8]) -> Result<ValidatedJson<T>, Response>
 where
     T: DeserializeOwned + Validate + Normalizable,
 {
+    let prepared = T::prepare_json(bytes)?;
+    let bytes = prepared.as_deref().unwrap_or(bytes);
     let data = match serde_json::from_slice::<T>(bytes) {
         Ok(data) => data,
         Err(_) => Json::<T>::from_bytes(bytes).map_err(json_rejection)?.0,
@@ -548,6 +568,255 @@ impl<T> std::ops::DerefMut for ValidatedJson<T> {
 
 #[cfg(all(test, feature = "axum"))]
 mod tests {
+    #[tokio::test]
+    async fn glm53_json_suffix_keeps_parameter_checks_and_history_repair() {
+        for content_type in [
+            "application/json",
+            "application/problem+json",
+            "application/vnd.api+json; charset=utf-8",
+        ] {
+            let req = |body: String| {
+                Request::builder()
+                    .method("POST")
+                    .header("content-type", content_type)
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            };
+            let body = json!({"model":"glm-5.3","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"});
+            let Err(response) = CompatibleChatJson::from_request(req(body.to_string()), &()).await
+            else {
+                panic!("bypassed {content_type}");
+            };
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap()["error"]["code"],
+                "1210"
+            );
+            let history = json!({"model":"glm-5.3","messages":[
+                {"role":"assistant","content":null,"tool_calls":[
+                    {"id":null,"type":"function","function":{"name":"","arguments":"{}"}},
+                    {"id":"c1","type":"function","function":{"name":"bash","arguments":"\"command\":\"echo hi\"}"}}]},
+                {"role":"tool","tool_call_id":"missing_tool_call_id","content":"error"}]});
+            let CompatibleChatJson(repaired) =
+                CompatibleChatJson::from_request(req(history.to_string()), &())
+                    .await
+                    .unwrap();
+            let repaired = serde_json::to_value(repaired).unwrap();
+            assert_eq!(
+                repaired["messages"][0]["tool_calls"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                repaired["messages"][0]["tool_calls"][0]["function"]["arguments"],
+                history["messages"][0]["tool_calls"][1]["function"]["arguments"]
+            );
+            let other = json!({"model":"qwen3","messages":[{"role":"user","content":"hi"}]});
+            assert!(
+                CompatibleChatJson::from_request(req(other.to_string()), &())
+                    .await
+                    .is_ok()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn glm53_wire_parameters_are_normalized_before_typed_parsing() {
+        use crate::chat::ChatCompletionRequest;
+        for fields in [
+            json!({"stream": 1}),
+            json!({"stream": 0}),
+            json!({"stream": false, "stream_options": {"include_usage": true}}),
+            json!({"n": -1}),
+            json!({"n": 0}),
+            json!({"n": 2}),
+            json!({"temperature": "0.5", "top_p": "0.5", "stream": "true", "max_tokens": "16"}),
+            json!({"max_tokens": 1.5}),
+            json!({"top_p": 1.5}),
+            json!({"response_format": {}}),
+            json!({"response_format": {"type": "foo"}}),
+            json!({"logprobs": true, "top_logprobs": 99}),
+            json!({"stop": []}),
+        ] {
+            let mut body =
+                json!({"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let request =
+                validated_json_bytes::<ChatCompletionRequest>(&serde_json::to_vec(&body).unwrap());
+            assert!(request.is_ok(), "{body}");
+            if body.get("n").is_some() {
+                assert_eq!(request.unwrap().n, Some(1));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn glm53_observed_rejections_keep_provider_codes() {
+        use crate::chat::ChatCompletionRequest;
+        for (fields, code) in [
+            (json!({"enable_thinking": false}), "1210"),
+            (json!({"thinking": {"type": "disabled"}}), "1210"),
+            (json!({"stop": "END"}), "400"),
+            (json!({"max_tokens": 0}), "1210"),
+            (json!({"request_id": "short"}), "1214"),
+            (json!({"user_id": "short"}), "1214"),
+            (
+                json!({"messages": [{"role": "user", "content": ""}]}),
+                "1213",
+            ),
+        ] {
+            let mut body =
+                json!({"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let Err(response) =
+                validated_json_bytes::<ChatCompletionRequest>(&serde_json::to_vec(&body).unwrap())
+            else {
+                panic!("accepted {body}")
+            };
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let actual: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(actual["error"]["code"], code);
+        }
+    }
+
+    #[test]
+    fn glm53_customer406_media_keeps_tool_history_and_other_models() {
+        use crate::glm53_request::{prepare, Api};
+        for (api, key, text_kind, image_kind, audio_kind) in [
+            (Api::Messages, "messages", "text", "image", "audio"),
+            (
+                Api::Responses,
+                "input",
+                "input_text",
+                "input_image",
+                "input_audio",
+            ),
+        ] {
+            let tool = json!({"type": "tool_result", "tool_use_id": "missing_tool_call_id", "content": "error"});
+            let mut body = json!({"model": "glm-5.3", "stream": 1});
+            body[key] = json!([{"role": "user", "content": [
+                {"type": text_kind, "text": "What media?"},
+                {"type": image_kind, "source": "invalid-base64"},
+                {"type": audio_kind, "source": "audio"}, tool.clone()]}]);
+            let bytes = serde_json::to_vec(&body).unwrap();
+            let fixed: Value =
+                serde_json::from_slice(&prepare(&bytes, api).unwrap().unwrap()).unwrap();
+            assert_eq!(fixed["stream"], true);
+            let parts = fixed[key][0]["content"].as_array().unwrap();
+            assert_eq!(parts.last(), Some(&tool));
+            assert_eq!(parts.len(), if api == Api::Messages { 2 } else { 3 });
+            if api == Api::Responses {
+                assert_eq!(
+                    parts[1],
+                    json!({"type": "input_text", "text": "image content omitted because you do not support image input"})
+                );
+            }
+            assert!(prepare(&serde_json::to_vec(&fixed).unwrap(), api)
+                .unwrap()
+                .is_none());
+            body["model"] = json!("qwen3");
+            assert!(prepare(&serde_json::to_vec(&body).unwrap(), api)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn glm53_retrieval_does_not_require_function_name() {
+        use crate::chat::ChatCompletionRequest;
+        let retrieval = json!({"type": "retrieval", "retrieval": {"knowledge_id": "kb_dummy"}});
+        let function = json!({"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}});
+        for tools in [
+            json!([retrieval.clone()]),
+            json!([retrieval.clone(), function]),
+        ] {
+            let expected_functions = tools.as_array().unwrap().len() - 1;
+            let body = json!({"model": "glm-5.3", "messages": [{"role": "user", "content": "OK"}], "tools": tools});
+            let request =
+                validated_json_bytes::<ChatCompletionRequest>(&serde_json::to_vec(&body).unwrap())
+                    .unwrap();
+            assert_eq!(request.tools.as_deref().unwrap().len(), expected_functions);
+            assert_eq!(
+                request.other["glm53_retrieval_tools"],
+                json!([retrieval.clone()])
+            );
+            if expected_functions == 1 {
+                assert_eq!(
+                    request.tools.as_deref().unwrap()[0].function.name,
+                    "get_weather"
+                );
+            }
+        }
+        let body = json!({"model": "qwen3", "messages": [{"role": "user", "content": "OK"}], "tools": [retrieval]});
+        assert!(
+            validated_json_bytes::<ChatCompletionRequest>(&serde_json::to_vec(&body).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn glm53_top_p_above_one_is_capped_only_for_glm53() {
+        use crate::glm53_request::{prepare, Api};
+        for api in [Api::Chat, Api::Messages, Api::Responses] {
+            for (input, expected) in [
+                (1.5, 1.0),
+                (100.0, 1.0),
+                (1.0, 1.0),
+                (0.5, 0.5),
+                (0.0, 0.0),
+                (-1.0, -1.0),
+            ] {
+                let body =
+                    serde_json::to_vec(&json!({"model": "glm-5.3", "top_p": input})).unwrap();
+                let fixed = prepare(&body, api).unwrap().unwrap_or(body);
+                let fixed: Value = serde_json::from_slice(&fixed).unwrap();
+                let expected = if api == Api::Chat && input < 0.0 {
+                    None
+                } else {
+                    Some(expected)
+                };
+                assert_eq!(fixed["top_p"].as_f64(), expected);
+            }
+            let other = br#"{"model":"qwen3","top_p":1.5}"#;
+            assert!(prepare(other, api).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn glm53_parameter_repair_preserves_history_and_other_models() {
+        use crate::glm53_request::{prepare, Api};
+        let history = json!([{ "role": "assistant", "content": null, "tool_calls": [
+            {"id": null, "type": "function", "function": {"name": "", "arguments": "{}"}},
+            {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "bad arguments"}}
+        ]}]);
+        let body = json!({"model": "glm-5.3", "messages": history, "n": -1});
+        let fixed = prepare(&serde_json::to_vec(&body).unwrap(), Api::Chat)
+            .unwrap()
+            .unwrap();
+        let fixed: Value = serde_json::from_slice(&fixed).unwrap();
+        assert_eq!(fixed["messages"], body["messages"]);
+        let other = br#"{"model":"qwen3","n":-1,"stop":"END"}"#;
+        assert!(prepare(other, Api::Chat).unwrap().is_none());
+        assert!(prepare(
+            br#"{"model":"glm-5.3","n":-1,"temperature":1,"temperature":2}"#,
+            Api::Chat
+        )
+        .unwrap()
+        .is_none());
+    }
+
     use axum::body::Body;
     use serde::{Deserialize, Serialize};
     use validator::Validate;

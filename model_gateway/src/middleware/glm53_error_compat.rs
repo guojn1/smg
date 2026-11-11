@@ -80,6 +80,32 @@ pub async fn chat_missing_model(request: Request, next: Next) -> Response {
         .await
 }
 
+/// Install only on the explicitly configured dedicated GLM-5.3 listener.
+/// The default router keeps its original routes and method handling.
+pub fn compact_routes<S: Clone + Send + Sync + 'static>(enabled: bool) -> axum::Router<S> {
+    let routes = axum::Router::new();
+    if enabled {
+        routes.route(
+            "/v1/responses/compact",
+            axum::routing::post(compact_unsupported),
+        )
+    } else {
+        routes
+    }
+}
+
+/// SMG does not implement Responses compaction. No inference is attempted.
+pub async fn compact_unsupported() -> Response {
+    (
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": {
+            "code": "not_implemented", "message": "Compact is not implemented yet",
+            "param": null, "type": "not_implemented"
+        }})),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -89,6 +115,38 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn compact_returns_official_unsupported_response() {
+        let response = compact_unsupported().await;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+        assert_eq!(
+            value,
+            json!({"error": {"code": "not_implemented", "message": "Compact is not implemented yet", "param": null, "type": "not_implemented"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_route_is_only_installed_on_dedicated_listener() {
+        for (enabled, status) in [
+            (false, StatusCode::METHOD_NOT_ALLOWED),
+            (true, StatusCode::NOT_IMPLEMENTED),
+        ] {
+            let app = Router::new()
+                .route(
+                    "/v1/responses/{response_id}",
+                    axum::routing::get(|| async { "existing retrieval" }),
+                )
+                .merge(compact_routes(enabled));
+            let response = app
+                .oneshot(request("/v1/responses/compact", "{}"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+        }
+    }
 
     fn app(limit: usize) -> Router {
         Router::new()
