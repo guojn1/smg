@@ -9,6 +9,7 @@ pub mod body_limit;
 pub mod body_timeout;
 pub mod concurrency;
 pub mod edge_body;
+pub mod glm53_error_compat;
 pub mod inert;
 pub mod logging;
 pub mod messages_errors;

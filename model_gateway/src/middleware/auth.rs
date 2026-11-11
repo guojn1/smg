@@ -47,6 +47,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AuthConfig {
     keys: Arc<HashMap<[u8; 32], TenantKey>>,
+    glm53_official_errors: bool,
 }
 
 impl AuthConfig {
@@ -78,7 +79,14 @@ impl AuthConfig {
 
         Self {
             keys: Arc::new(keys),
+            glm53_official_errors: false,
         }
+    }
+
+    /// Only serving-plane Responses failures on an explicitly opted-in endpoint.
+    pub fn with_glm53_official_errors(mut self, enabled: bool) -> Self {
+        self.glm53_official_errors = enabled;
+        self
     }
 
     /// Whether any key is configured. Empty means [`auth_middleware`]
@@ -129,6 +137,12 @@ pub async fn auth_middleware(
             .and_then(|hash| auth_config.keys.get(hash));
 
         let Some(tenant_key) = tenant_key else {
+            if let Some(response) = super::glm53_error_compat::auth_rejection(
+                &request,
+                auth_config.glm53_official_errors,
+            ) {
+                return response;
+            }
             return unauthorized(token_hash.is_some());
         };
 
@@ -224,6 +238,42 @@ mod tests {
 
     use super::*;
     use crate::routers::common::header_utils::extract_auth_header;
+
+    #[tokio::test]
+    async fn glm53_wire_errors_never_bypass_or_enable_authentication() {
+        for (key, bearer, enabled, expected) in [
+            (Some("secret"), None, true, "1001"),
+            (Some("secret"), Some("bad"), true, "401"),
+            (Some("secret"), Some("secret"), true, "handler"),
+            (None, None, true, "handler"),
+            (None, Some("bad"), true, "handler"),
+            (Some("secret"), None, false, "unauthorized"),
+        ] {
+            let config =
+                AuthConfig::new(key.map(str::to_owned)).with_glm53_official_errors(enabled);
+            let app = Router::new()
+                .route("/v1/responses", axum::routing::post(|| async { "handler" }))
+                .route_layer(from_fn_with_state(config, auth_middleware));
+            let mut req = Request::builder().method("POST").uri("/v1/responses");
+            if let Some(token) = bearer {
+                req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            let response = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            if expected == "unauthorized" {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+                let text = body_text(response).await;
+                if expected == "handler" {
+                    assert_eq!(text, "handler");
+                } else {
+                    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(value["code"].as_i64().unwrap().to_string(), expected);
+                    assert_eq!(value["success"], false);
+                }
+            }
+        }
+    }
 
     async fn handler(request: Request<Body>) -> impl IntoResponse {
         request

@@ -1143,6 +1143,22 @@ pub fn build_apps(
     // clones its state and boxes its future per request whatever it does; an
     // inert member is one match). The keys are fixed at start-up, so the
     // decision at build time is the one the layer made per request.
+    // Missing model/auth cannot be identified by a model name in the body.
+    // Opt in only on a dedicated GLM-5.3/Zhipu-compatible serving endpoint.
+    let glm53_official_errors = middleware::glm53_error_compat::enabled();
+    let serving_auth_config = serving_auth_config.with_glm53_official_errors(glm53_official_errors);
+    let glm53_error_layer = glm53_official_errors.then(|| {
+        tower::ServiceBuilder::new()
+            // The compatibility check reads the body before raw forwarding;
+            // preserve the same read watchdog and outer payload limits.
+            .layer(
+                middleware::RequestBodyTimeouts::from_config(&app_state.context.router_config)
+                    .layer(),
+            )
+            .layer(axum::middleware::from_fn(
+                middleware::glm53_error_compat::chat_missing_model,
+            ))
+    });
     let serving_auth_layer = serving_auth_config.is_enabled().then(|| {
         axum::middleware::from_fn_with_state(
             serving_auth_config.clone(),
@@ -1260,6 +1276,7 @@ pub fn build_apps(
                 .layer(
                     middleware::SseKeepAlive::from_config(&app_state.context.router_config).layer(),
                 )
+                .layer(InertLayer(glm53_error_layer))
                 .layer(
                     StreamBodyState::new(app_state.router.clone(), app_state.context.clone())
                         .layer(),
