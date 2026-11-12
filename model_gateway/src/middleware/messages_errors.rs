@@ -140,9 +140,15 @@ pub async fn into_messages_envelope(response: Response, request_id: String) -> R
     let bytes = axum::body::to_bytes(body, ERROR_BODY_LIMIT)
         .await
         .unwrap_or_default();
+    let mut preserved_code = None;
     let error = match serde_json::from_slice::<Value>(&bytes) {
         Ok(json) => match messages_error_of(&json) {
-            Some(error) => error,
+            Some(error) => {
+                // Preserve an existing provider code in an already valid Messages
+                // envelope, including through the second outer wrapping layer.
+                preserved_code = json.get("error").and_then(|e| e.get("code")).cloned();
+                error
+            }
             None => ErrorResponse {
                 error_type: messages_error_type(status).to_string(),
                 message: message_of(&json).unwrap_or_else(|| reason(status)),
@@ -154,6 +160,10 @@ pub async fn into_messages_envelope(response: Response, request_id: String) -> R
         },
     };
     let envelope = ErrorEnvelope::new(error, request_id);
+    let mut envelope = serde_json::to_value(envelope).unwrap_or_default();
+    if let Some(code) = preserved_code {
+        envelope["error"]["code"] = code;
+    }
     let json = serde_json::to_vec(&envelope).unwrap_or_default();
     parts
         .headers
@@ -449,5 +459,41 @@ mod tests {
         assert!(!wants_messages_envelope(&headers, "/v1/messagesx"));
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         assert!(wants_messages_envelope(&headers, "/v1/models/claude-x"));
+    }
+}
+
+#[cfg(test)]
+mod provider_code_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use axum::Json;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn glm53_provider_code_survives_both_messages_layers() {
+        let response = (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"type":"error", "error": {
+                "type":"invalid_request_error", "message":"max_tokens invalid", "code":"1210"
+            }})),
+        )
+            .into_response();
+        let response = into_messages_envelope(response, "msg_inner".into()).await;
+        let response = into_messages_envelope(response, "msg_outer".into()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let (parts, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["code"], "1210");
+        assert_eq!(value["error"]["type"], "invalid_request_error");
+        assert_eq!(value["request_id"], "msg_outer");
+        assert_eq!(
+            parts.headers[CONTENT_LENGTH]
+                .to_str()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            bytes.len()
+        );
     }
 }

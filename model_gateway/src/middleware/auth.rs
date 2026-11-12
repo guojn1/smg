@@ -48,6 +48,7 @@ use crate::{
 pub struct AuthConfig {
     keys: Arc<HashMap<[u8; 32], TenantKey>>,
     glm53_official_errors: bool,
+    glm53_error_scope: Option<super::glm53_error_compat::ErrorScope>,
 }
 
 impl AuthConfig {
@@ -80,12 +81,18 @@ impl AuthConfig {
         Self {
             keys: Arc::new(keys),
             glm53_official_errors: false,
+            glm53_error_scope: None,
         }
     }
 
     /// Only serving-plane Responses failures on an explicitly opted-in endpoint.
     pub fn with_glm53_official_errors(mut self, enabled: bool) -> Self {
         self.glm53_official_errors = enabled;
+        self
+    }
+
+    pub fn with_glm53_error_scope(mut self, scope: super::glm53_error_compat::ErrorScope) -> Self {
+        self.glm53_error_scope = Some(scope);
         self
     }
 
@@ -139,7 +146,11 @@ pub async fn auth_middleware(
         let Some(tenant_key) = tenant_key else {
             if let Some(response) = super::glm53_error_compat::auth_rejection(
                 &request,
-                auth_config.glm53_official_errors,
+                auth_config.glm53_official_errors
+                    || auth_config
+                        .glm53_error_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.enabled()),
             ) {
                 return response;
             }

@@ -132,7 +132,7 @@ async fn sink_handler(request: Request) -> Response {
 }
 
 /// A known URL with the wrong method (axum adds the `Allow` header).
-async fn method_not_allowed_handler(request: Request) -> Response {
+pub(crate) async fn method_not_allowed_handler(request: Request) -> Response {
     unknown_route(
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
@@ -1143,11 +1143,11 @@ pub fn build_apps(
     // clones its state and boxes its future per request whatever it does; an
     // inert member is one match). The keys are fixed at start-up, so the
     // decision at build time is the one the layer made per request.
-    // Missing model/auth cannot be identified by a model name in the body.
-    // Opt in only on a dedicated GLM-5.3/Zhipu-compatible serving endpoint.
-    let glm53_official_errors = middleware::glm53_error_compat::enabled();
-    let serving_auth_config = serving_auth_config.with_glm53_official_errors(glm53_official_errors);
-    let glm53_error_layer = glm53_official_errors.then(|| {
+    // Scope missing-model errors to a dynamically discovered GLM-5.3-only router.
+    let glm53_error_scope =
+        middleware::glm53_error_compat::ErrorScope::new(app_state.context.worker_registry.clone());
+    let serving_auth_config = serving_auth_config.with_glm53_error_scope(glm53_error_scope.clone());
+    let glm53_error_layer = Some({
         tower::ServiceBuilder::new()
             // The compatibility check reads the body before raw forwarding;
             // preserve the same read watchdog and outer payload limits.
@@ -1155,8 +1155,9 @@ pub fn build_apps(
                 middleware::RequestBodyTimeouts::from_config(&app_state.context.router_config)
                     .layer(),
             )
-            .layer(axum::middleware::from_fn(
-                middleware::glm53_error_compat::chat_missing_model,
+            .layer(axum::middleware::from_fn_with_state(
+                glm53_error_scope.clone(),
+                middleware::glm53_error_compat::scoped_chat_missing_model,
             ))
     });
     let serving_auth_layer = serving_auth_config.is_enabled().then(|| {
@@ -1224,8 +1225,8 @@ pub fn build_apps(
     // since the streamed relay has its own watchdog).
     let typed_routes = Router::new()
         .route("/v1/responses", post(v1_responses))
-        .merge(middleware::glm53_error_compat::compact_routes(
-            glm53_official_errors,
+        .merge(middleware::glm53_error_compat::scoped_compact_routes(
+            glm53_error_scope,
         ))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(

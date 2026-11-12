@@ -1,10 +1,10 @@
-//! Opt-in wire errors for a dedicated Zhipu-compatible GLM-5.3 endpoint.
-//! Missing model and failed authentication cannot be scoped by request.model.
-//! Enable only on a dedicated listener with SMG_GLM53_OFFICIAL_ERROR_COMPAT=1.
+//! Official wire errors for a dedicated GLM-5.3 endpoint.
+//! Auto-enable only when all registered workers serve GLM-5.3.
+//! The existing environment switch remains an explicit override (0/1).
 
 use axum::{
     body::{Body, Bytes},
-    extract::{FromRequest, Request},
+    extract::{FromRequest, Request, State},
     http::{header, Method},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -15,8 +15,70 @@ use serde_json::{json, value::RawValue};
 
 pub const ENV: &str = "SMG_GLM53_OFFICIAL_ERROR_COMPAT";
 
-pub fn enabled() -> bool {
-    std::env::var(ENV).is_ok_and(|value| value == "1")
+#[derive(Clone)]
+pub struct ErrorScope {
+    registry: std::sync::Arc<crate::worker::registry::WorkerRegistry>,
+    explicit: Option<bool>,
+}
+
+impl ErrorScope {
+    pub fn new(registry: std::sync::Arc<crate::worker::registry::WorkerRegistry>) -> Self {
+        let explicit = match std::env::var(ENV).as_deref() {
+            Ok("1") => Some(true),
+            Ok("0") => Some(false),
+            _ => None,
+        };
+        Self { registry, explicit }
+    }
+
+    pub fn enabled(&self) -> bool {
+        if let Some(explicit) = self.explicit {
+            return explicit;
+        }
+        // Check every worker, including wildcard/unknown-model workers that
+        // get_models() intentionally omits. Read at request time: registration
+        // happens after the HTTP server starts, and can change later.
+        let workers = self.registry.get_all();
+        !workers.is_empty()
+            && workers.iter().all(|worker| {
+                crate::worker::registry::WorkerRegistry::worker_model_ids(worker)
+                    .iter()
+                    .all(|model| openai_protocol::glm53_request::is_glm53(model))
+            })
+    }
+}
+
+pub async fn scoped_chat_missing_model(
+    State(scope): State<ErrorScope>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() == Method::POST
+        && request.uri().path() == "/v1/chat/completions"
+        && scope.enabled()
+    {
+        chat_missing_model(request, next).await
+    } else {
+        next.run(request).await
+    }
+}
+
+pub fn scoped_compact_routes<S: Clone + Send + Sync + 'static>(
+    scope: ErrorScope,
+) -> axum::Router<S> {
+    axum::Router::new().route(
+        "/v1/responses/compact",
+        axum::routing::post(move |request: Request| {
+            let enabled = scope.enabled();
+            async move {
+                if enabled {
+                    compact_unsupported().await
+                } else {
+                    crate::server::method_not_allowed_handler(request).await
+                }
+            }
+        }),
+    )
 }
 
 /// Called only after the existing serving-key check has rejected a request.
@@ -82,6 +144,7 @@ pub async fn chat_missing_model(request: Request, next: Next) -> Response {
 
 /// Install only on the explicitly configured dedicated GLM-5.3 listener.
 /// The default router keeps its original routes and method handling.
+#[cfg(test)]
 pub fn compact_routes<S: Clone + Send + Sync + 'static>(enabled: bool) -> axum::Router<S> {
     let routes = axum::Router::new();
     if enabled {
@@ -263,5 +326,141 @@ mod tests {
         *req.method_mut() = Method::GET;
         assert!(auth_rejection(&req, true).is_none());
         assert!(auth_rejection(&request("/v1/chat/completions", "{}"), true).is_none());
+    }
+}
+
+#[cfg(test)]
+mod auto_scope_tests {
+    use super::*;
+    use crate::worker::{builder::BasicWorkerBuilder, registry::WorkerRegistry};
+    use axum::{body::to_bytes, http::StatusCode, routing::post, Router};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn scope() -> ErrorScope {
+        ErrorScope {
+            registry: Arc::new(WorkerRegistry::new()),
+            explicit: None,
+        }
+    }
+    fn add(scope: &ErrorScope, url: &str, model: Option<&str>) {
+        let builder = BasicWorkerBuilder::new(url);
+        let builder = match model {
+            Some(model) => builder.model(openai_protocol::model_card::ModelCard::new(model)),
+            None => builder,
+        };
+        scope.registry.register(Arc::new(builder.build()));
+    }
+    fn request(path: &str, body: &str) -> Request {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn glm53_auto_scope_registration_and_routes() {
+        let scope = scope();
+        assert!(!scope.enabled());
+        add(&scope, "http://glm:8000", Some("glm-5.3"));
+        assert!(scope.enabled());
+        let app = || {
+            Router::new()
+                .route(
+                    "/v1/chat/completions",
+                    post(|body: Bytes| async move { body }),
+                )
+                .layer(axum::middleware::from_fn_with_state(
+                    scope.clone(),
+                    scoped_chat_missing_model,
+                ))
+        };
+        for body in ["{}", r#"{"model":null}"#, r#"{"messages":[]}"#] {
+            let response = app()
+                .oneshot(request("/v1/chat/completions", body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                to_bytes(response.into_body(), 2048).await.unwrap().as_ref(),
+                br#"{"error":{"code":"500"}}"#
+            );
+        }
+        let response = scoped_compact_routes(scope.clone())
+            .oneshot(request("/v1/responses/compact", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        add(&scope, "http://qwen:8000", Some("qwen3"));
+        assert!(!scope.enabled());
+        let response = app()
+            .oneshot(request("/v1/chat/completions", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            to_bytes(response.into_body(), 2048).await.unwrap().as_ref(),
+            b"{}"
+        );
+        let response = scoped_compact_routes(scope.clone())
+            .oneshot(request("/v1/responses/compact", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        scope.registry.remove_by_url("http://qwen:8000");
+        assert!(scope.enabled());
+        add(&scope, "http://unknown:8000", None);
+        assert!(!scope.enabled());
+        scope.registry.remove_by_url("http://unknown:8000");
+        assert!(!ErrorScope {
+            explicit: Some(false),
+            ..scope.clone()
+        }
+        .enabled());
+        scope.registry.remove_by_url("http://glm:8000");
+        assert!(!scope.enabled());
+    }
+
+    #[tokio::test]
+    async fn glm53_auto_auth_formats_only_real_rejections() {
+        let scope = scope();
+        add(&scope, "http://glm:8000", Some("glm-5.3"));
+        for key in [None, Some("test-serving-key".to_owned())] {
+            let config = crate::middleware::auth::AuthConfig::new(key.clone())
+                .with_glm53_error_scope(scope.clone());
+            let app = Router::new()
+                .route(
+                    "/v1/responses",
+                    post(|| async { Json(json!({"accepted":true})) }),
+                )
+                .layer(axum::middleware::from_fn_with_state(
+                    config,
+                    crate::middleware::auth::auth_middleware,
+                ));
+            for token in [
+                None,
+                Some("Bearer invalid"),
+                Some("Bearer test-serving-key"),
+            ] {
+                let mut req = request("/v1/responses", "{}");
+                if let Some(token) = token {
+                    req.headers_mut()
+                        .insert(header::AUTHORIZATION, token.parse().unwrap());
+                }
+                let response = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let value: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 2048).await.unwrap())
+                        .unwrap();
+                if key.is_none() || token == Some("Bearer test-serving-key") {
+                    assert_eq!(value["accepted"], true);
+                } else {
+                    assert_eq!(value["code"], if token.is_none() { 1001 } else { 401 });
+                    assert_eq!(value["success"], false);
+                    assert!(value.get("accepted").is_none());
+                }
+            }
+        }
     }
 }
